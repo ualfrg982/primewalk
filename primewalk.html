@@ -1,1 +1,314 @@
+<!DOCTYPE html>
+<html lang="es" class="w-full h-full m-0 p-0 overflow-hidden bg-white select-none">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>primewalk</title>
+    <style>
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+        body, html {
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+            background-color: #000000;
+        }
+        canvas {
+            display: block;
+            width: 100vw;
+            height: 100vh;
+        }
+    </style>
+</head>
+<body>
 
+    <canvas id="canvas"></canvas>
+
+    <script>
+        // Configuración
+        const STEP_DELAY_MS = 80; // Tiempo por cada paso en ms
+
+		// Colores
+		const COLOR = {
+			screenColor: "#FFEEAA", // Color de fondo de la pantalla
+			strokeColor: "#000088",	// Color del trazo
+			gridColor: "#FF0000", 	// Color de la cuadrícula
+			headColor: "#FF0000"	// Color del extremo actual
+		};
+
+        // Direcciones: 0: Arriba (0, -1), 1: Derecha (1, 0), 2: Abajo (0, 1), 3: Izquierda (-1, 0)
+        const DIRECTIONS = [
+            { x: 0, y: -1 },
+            { x: 1, y: 0 },
+            { x: 0, y: 1 },
+            { x: -1, y: 0 }
+        ];
+
+        // Generator de Primos Optimizado mediante Caché Incremental
+        class PrimeGenerator {
+            constructor() {
+                this.primes = [2];
+                this.lastCandidate = 1;
+            }
+
+            next() {
+                if (this.primes.length === 1 && this.lastCandidate === 1) {
+                    this.lastCandidate = 3;
+                    this.primes.push(3);
+                    return 3;
+                }
+
+                let candidate = this.lastCandidate + 2; // Solo evaluar impares
+
+                while (true) {
+                    let isPrime = true;
+                    const limit = Math.sqrt(candidate);
+
+                    // Probar divisibilidad únicamente contra los primos acumulados hasta Math.sqrt(candidate)
+                    for (let i = 0; i < this.primes.length; i++) {
+                        const p = this.primes[i];
+                        if (p > limit) break;
+                        if (candidate % p === 0) {
+                            isPrime = false;
+                            break;
+                        }
+                    }
+
+                    if (isPrime) {
+                        this.primes.push(candidate);
+                        this.lastCandidate = candidate;
+                        return candidate;
+                    }
+
+                    candidate += 2;
+                }
+            }
+        }
+
+        // Canvas setup
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+
+        // Instancia del generador de primos
+        const primeGen = new PrimeGenerator();
+
+        // Estado del autómata
+        let globalCounter = 0;   // Casillas totales recorridas
+        let currentPrime = 2;    // Primer primo objetivo
+        let dirIndex = 0;        // Dirección actual
+        let currentX = 0;        // Posición actual
+        let currentY = 0;
+        let lastStepTime = 0;
+
+        // Estructuras de datos
+        const visitedCells = new Map();
+        const segments = []; // Para renderizado optimizado por líneas cuando el zoom es muy alejado
+        let boundingBox = { minX: 0, maxX: 0, minY: 0, maxY: 0 };
+
+        // Cámara
+        let cameraX = 0;
+        let cameraY = 0;
+        let targetCameraX = 0;
+        let targetCameraY = 0;
+        let cameraZoom = 32;
+        let targetZoom = 32;
+
+        // Registrar casilla
+        function markCellVisited(x, y) {
+            const key = `${x},${y}`;
+            visitedCells.set(key, true);
+
+            if (x < boundingBox.minX) boundingBox.minX = x;
+            if (x > boundingBox.maxX) boundingBox.maxX = x;
+            if (y < boundingBox.minY) boundingBox.minY = y;
+            if (y > boundingBox.maxY) boundingBox.maxY = y;
+        }
+
+        // Ejecutar un paso completo (un trazo hasta alcanzar el siguiente primo)
+        function executeStep() {
+            const stepsToTake = currentPrime - globalCounter;
+
+            if (stepsToTake > 0) {
+                const dir = DIRECTIONS[dirIndex];
+                const startX = currentX;
+                const startY = currentY;
+
+                for (let i = 0; i < stepsToTake; i++) {
+                    currentX += dir.x;
+                    currentY += dir.y;
+                    globalCounter++;
+                    markCellVisited(currentX, currentY);
+                }
+
+                // Guardar trazo estructurado para acelerar y suavizar renderizado lejano
+                segments.push({
+                    x1: startX,
+                    y1: startY,
+                    x2: currentX,
+                    y2: currentY
+                });
+            }
+
+            // Giro 90° en sentido horario
+            dirIndex = (dirIndex + 1) % 4;
+
+            // Obtener el siguiente número primo de forma instantánea
+            currentPrime = primeGen.next();
+        }
+
+        // Ajuste fluido y rápido de la cámara
+        function updateCamera() {
+            const widthGrid = (boundingBox.maxX - boundingBox.minX) + 8;
+            const heightGrid = (boundingBox.maxY - boundingBox.minY) + 8;
+
+            const scaleX = canvas.width / widthGrid;
+            const scaleY = canvas.height / heightGrid;
+
+            // Zoom objetivo
+            targetZoom = Math.max(0.1, Math.min(Math.min(scaleX, scaleY), 32));
+
+            targetCameraX = (boundingBox.minX + boundingBox.maxX) / 2;
+            targetCameraY = (boundingBox.minY + boundingBox.maxY) / 2;
+
+            // Factor de aceleración de la cámara
+            const LERP_FACTOR = 0.18;
+
+            cameraZoom += (targetZoom - cameraZoom) * LERP_FACTOR;
+            cameraX += (targetCameraX - cameraX) * LERP_FACTOR;
+            cameraY += (targetCameraY - cameraY) * LERP_FACTOR;
+        }
+
+        // Dibujar el escenario
+        function render() {
+            // Limpiar fondo blanco
+            ctx.fillStyle = COLOR.screenColor;
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+            const screenCenterX = canvas.width / 2;
+            const screenCenterY = canvas.height / 2;
+            const cz = cameraZoom;
+
+            // 1. RENDERIZADO DE CUADRÍCULA (con degradado/fade out progresivo según la cercanía)
+            if (cz >= 2.5) {
+                // Suavizado del alpha de la cuadrícula
+                const gridAlpha = Math.min(1, (cz/1.5 - 2.5) / 3.5);
+				ctx.strokeStyle = `rgba(005, 030, 230, ${gridAlpha.toFixed(3)})`;
+				//ctx.strokeStyle = COLOR.gridColor;
+                ctx.lineWidth = 1;
+
+                const startGX = Math.floor((-screenCenterX) / cz + cameraX) - 2;
+                const endGX = Math.ceil((screenCenterX) / cz + cameraX) + 2;
+                const startGY = Math.floor((-screenCenterY) / cz + cameraY) - 2;
+                const endGY = Math.ceil((screenCenterY) / cz + cameraY) + 2;
+
+                ctx.beginPath();
+                // Líneas verticales alineadas a pixel exacto
+                for (let x = startGX; x <= endGX; x++) {
+                    const vx = Math.floor(screenCenterX + (x - cameraX) * cz) + 0.5;
+                    ctx.moveTo(vx, 0);
+                    ctx.lineTo(vx, canvas.height);
+                }
+                // Líneas horizontales alineadas a pixel exacto
+                for (let y = startGY; y <= endGY; y++) {
+                    const vy = Math.floor(screenCenterY + (y - cameraY) * cz) + 0.5;
+                    ctx.moveTo(0, vy);
+                    ctx.lineTo(canvas.width, vy);
+                }
+                ctx.stroke();
+            }
+
+            ctx.save();
+            ctx.translate(screenCenterX, screenCenterY);
+
+            // 2. RENDERIZADO DEL TRAZO/ESPIAL (Adaptativo)
+            if (cz >= 3.0) {
+                // VISTA CERCANA: Dibujar por celda exacta
+                ctx.fillStyle = COLOR.strokeColor;
+                visitedCells.forEach((_, key) => {
+                    const [gx, gy] = key.split(',').map(Number);
+                    if (gx === currentX && gy === currentY) return; // Se dibuja la cabeza aparte
+
+                    const px = Math.floor((gx - cameraX) * cz);
+                    const py = Math.floor((gy - cameraY) * cz);
+                    const size = Math.ceil(cz);
+                    ctx.fillRect(px, py, size, size);
+                });
+            } else {
+                // VISTA ALEJADA / ZOOM MUY DISTANTE: Renderizar por segmentos continuos con suavizado de líneas
+                // Esto evita el parpadeo de píxeles ("moiré") y mantiene el trazo nítido y legible.
+                ctx.strokeStyle = COLOR.strokeColor;
+                ctx.lineWidth = Math.max(1.5, cz); // Grosor mínimo para asegurar visibilidad constante
+                ctx.lineCap = 'square';
+                ctx.lineJoin = 'miter';
+
+                ctx.beginPath();
+                for (let i = 0; i < segments.length; i++) {
+                    const seg = segments[i];
+                    // Centramos el trazo en la casilla
+                    const x1 = (seg.x1 + 0.5 - cameraX) * cz;
+                    const y1 = (seg.y1 + 0.5 - cameraY) * cz;
+                    const x2 = (seg.x2 + 0.5 - cameraX) * cz;
+                    const y2 = (seg.y2 + 0.5 - cameraY) * cz;
+
+                    ctx.moveTo(x1, y1);
+                    ctx.lineTo(x2, y2);
+                }
+                ctx.stroke();
+            }
+
+            // 3. RENDERIZADO DEL EXTREMO ACTUAL
+            const headPx = (currentX + 0.5 - cameraX) * cz;
+            const headPy = (currentY + 0.5 - cameraY) * cz;
+            const headRadius = Math.max(2, cz * 0.6); // Tamaño mínimo para ser visible a cualquier distancia
+
+            ctx.fillStyle = COLOR.headColor;
+            if (cz >= 3.0) {
+                const px = Math.floor((currentX - cameraX) * cz);
+                const py = Math.floor((currentY - cameraY) * cz);
+                const size = Math.ceil(cz);
+                ctx.fillRect(px, py, size, size);
+            } else {
+                ctx.beginPath();
+                ctx.arc(headPx, headPy, headRadius, 0, Math.PI * 2);
+                ctx.fill();
+            }
+
+            ctx.restore();
+        }
+
+        // Bucle principal
+        function loop(timestamp) {
+            if (timestamp - lastStepTime >= STEP_DELAY_MS) {
+                executeStep();
+                lastStepTime = timestamp;
+            }
+
+            updateCamera();
+            render();
+
+            requestAnimationFrame(loop);
+        }
+
+        function handleResize() {
+            canvas.width = window.innerWidth;
+            canvas.height = window.innerHeight;
+            render();
+        }
+
+        // Inicialización
+        window.onload = () => {
+            handleResize();
+            window.addEventListener('resize', handleResize);
+
+            // Posición inicial (0,0)
+            markCellVisited(0, 0);
+
+            lastStepTime = performance.now();
+            requestAnimationFrame(loop);
+        };
+    </script>
+</body>
+</html>
